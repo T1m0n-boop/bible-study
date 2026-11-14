@@ -6,11 +6,27 @@ import { supabase } from "../../lib/supabase";
 import QuestionTableBuilder, { type QuestionTableConfig, validateQuestionTable, normalizeQuestionTable } from "../../components/QuestionTableBuilder";
 import QuestionSupplementBuilder, { type SupplementItem, validateSupplementItems } from "../../components/QuestionSupplementBuilder";
 
-type StudyQuestion = { id: string; text: string; table_config: QuestionTableConfig | null; supplements: SupplementItem[] };
-type StudyDraft = { title: string; passage: string; description: string; questions: StudyQuestion[] };
+type StudyQuestion = {
+  id: string;
+  text: string;
+  leader_notes: string;
+  table_config: QuestionTableConfig | null;
+  supplements: SupplementItem[];
+};
+type StudyDraft = {
+  title: string;
+  passage: string;
+  description: string;
+  leader_notes: string;
+  questions: StudyQuestion[];
+};
 const STORAGE_KEY = "bible-study-host-draft";
+
+function emptyQuestion(): StudyQuestion {
+  return { id: crypto.randomUUID(), text: "", leader_notes: "", table_config: null, supplements: [] };
+}
 function emptyDraft(): StudyDraft {
-  return { title: "", passage: "", description: "", questions: [{ id: crypto.randomUUID(), text: "", table_config: null, supplements: [] }] };
+  return { title: "", passage: "", description: "", leader_notes: "", questions: [emptyQuestion()] };
 }
 
 export default function HostPage() {
@@ -22,9 +38,23 @@ export default function HostPage() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as StudyDraft;
+        const parsed = JSON.parse(saved) as Partial<StudyDraft>;
         if (parsed && Array.isArray(parsed.questions)) {
-          setDraft({ ...parsed, questions: parsed.questions.map(q => ({ ...q, table_config: q.table_config ?? null, supplements: Array.isArray(q.supplements) ? q.supplements.map(s => ({ ...s, localId: s.localId || crypto.randomUUID() })) : [] })) });
+          setDraft({
+            title: parsed.title ?? "",
+            passage: parsed.passage ?? "",
+            description: parsed.description ?? "",
+            leader_notes: parsed.leader_notes ?? "",
+            questions: parsed.questions.map(q => ({
+              ...q,
+              id: q.id || crypto.randomUUID(),
+              leader_notes: q.leader_notes ?? "",
+              table_config: q.table_config ?? null,
+              supplements: Array.isArray(q.supplements)
+                ? q.supplements.map(s => ({ ...s, localId: s.localId || crypto.randomUUID() }))
+                : [],
+            })),
+          });
           return;
         }
       } catch { /* Ignore invalid saved data. */ }
@@ -32,7 +62,7 @@ export default function HostPage() {
     setDraft(emptyDraft());
   }, []);
 
-  function updateField(field: "title" | "passage" | "description", value: string) {
+  function updateField(field: "title" | "passage" | "description" | "leader_notes", value: string) {
     setDraft(old => old ? { ...old, [field]: value } : old);
     setMessage("");
   }
@@ -41,7 +71,7 @@ export default function HostPage() {
     setMessage("");
   }
   function addQuestion() {
-    setDraft(old => old ? { ...old, questions: [...old.questions, { id: crypto.randomUUID(), text: "", table_config: null, supplements: [] }] } : old);
+    setDraft(old => old ? { ...old, questions: [...old.questions, emptyQuestion()] } : old);
     setMessage("");
   }
   function removeQuestion(id: string) {
@@ -76,11 +106,18 @@ export default function HostPage() {
       const { data: authData, error: authError } = await supabase.auth.getUser();
       if (authError || !authData.user) throw new Error("Please sign in before saving your study.");
       const { data: study, error: studyError } = await supabase.from("studies").insert({
-        title: draft.title.trim(), passage: draft.passage.trim(), description: draft.description.trim(),
+        title: draft.title.trim(),
+        passage: draft.passage.trim(),
+        description: draft.description.trim(),
+        leader_notes: draft.leader_notes.trim() || null,
       }).select("id").single();
       if (studyError || !study) throw new Error("Could not save study: " + (studyError?.message ?? "Unknown error"));
       const questionRows = draft.questions.map((q, index) => ({
-        study_id: study.id, question_number: index + 1, question_text: q.text.trim(), table_config: normalizeQuestionTable(q.table_config),
+        study_id: study.id,
+        question_number: index + 1,
+        question_text: q.text.trim(),
+        leader_notes: q.leader_notes.trim() || null,
+        table_config: normalizeQuestionTable(q.table_config),
       }));
       const { data: savedQuestions, error: questionsError } = await supabase.from("study_questions").insert(questionRows).select("id, question_number");
       if (questionsError || !savedQuestions) throw new Error("Study created, but questions could not be saved: " + (questionsError?.message ?? "No question IDs returned"));
@@ -95,7 +132,7 @@ export default function HostPage() {
         if (itemError) throw new Error("Study and questions created, but supplementary items could not be saved: " + itemError.message + ". Check the created study before retrying.");
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
-      setMessage("Study, questions, and supplementary items saved successfully to Supabase!");
+      setMessage("Study, questions, leader notes, and supplementary items saved successfully to Supabase!");
     } catch (e) { setMessage(e instanceof Error ? e.message : "Could not save study."); }
     finally { setSaving(false); }
   }
@@ -112,6 +149,10 @@ export default function HostPage() {
         <label className="block font-medium">Study Title<input value={draft.title} onChange={e => updateField("title", e.target.value)} placeholder="e.g. Trusting God in Difficult Times" className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-3" /></label>
         <label className="block font-medium">Bible Passage<input value={draft.passage} onChange={e => updateField("passage", e.target.value)} placeholder="e.g. Psalm 11:1-7" className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-3" /></label>
         <label className="block font-medium">Study Description<textarea value={draft.description} onChange={e => updateField("description", e.target.value)} rows={3} placeholder="What is the main purpose of this study?" className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-3" /></label>
+        <label className="block font-medium">General Leader Notes <span className="text-sm font-normal text-slate-500">(private · optional)</span>
+          <textarea value={draft.leader_notes} onChange={e => updateField("leader_notes", e.target.value)} rows={6} placeholder="Introduction, main themes, discussion transitions, and conclusion..." className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-3" />
+          <span className="mt-1 block text-sm font-normal text-slate-500">These notes are for the study leader, not for participants.</span>
+        </label>
       </div>
       <section className="mt-8"><h2 className="mb-4 text-2xl font-semibold">Discussion Questions</h2>
         <div className="space-y-4">{draft.questions.map((q, index) => <div key={q.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -120,6 +161,9 @@ export default function HostPage() {
           <textarea id={`question-${q.id}`} disabled={saving} value={q.text} onChange={e => updateQuestion(q.id, { text: e.target.value })} placeholder="Enter your discussion question..." rows={3} className="w-full rounded-lg border border-slate-300 px-4 py-3" />
           <QuestionTableBuilder value={q.table_config} onChange={value => updateQuestion(q.id, { table_config: value })} disabled={saving} />
           <QuestionSupplementBuilder value={q.supplements} onChange={value => updateQuestion(q.id, { supplements: value })} disabled={saving} />
+          <label className="mt-5 block font-medium">Leader Notes for This Question <span className="text-sm font-normal text-slate-500">(private · optional)</span>
+            <textarea disabled={saving} value={q.leader_notes} onChange={e => updateQuestion(q.id, { leader_notes: e.target.value })} rows={4} placeholder="Key talking points, explanations, follow-up prompts, and reminders..." className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-3" />
+          </label>
         </div>)}</div>
         <button type="button" disabled={saving} onClick={addQuestion} className="mt-5 rounded-lg border border-indigo-600 px-5 py-3 font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">+ Add Question</button>
       </section>

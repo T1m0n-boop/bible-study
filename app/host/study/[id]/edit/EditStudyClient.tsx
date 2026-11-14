@@ -12,6 +12,7 @@ type Question = {
   id?: string;
   localId: string;
   question_text: string;
+  leader_notes: string;
   table_config: QuestionTableConfig | null;
   supplements: SupplementItem[];
 };
@@ -32,6 +33,7 @@ export default function EditStudyPage() {
   const [title, setTitle] = useState("");
   const [passage, setPassage] = useState("");
   const [description, setDescription] = useState("");
+  const [leaderNotes, setLeaderNotes] = useState("");
   const [questions, setQuestions] = useState<Question[]>([]);
   const [originalIds, setOriginalIds] = useState<string[]>([]);
   const [hasSessions, setHasSessions] = useState(false);
@@ -44,8 +46,8 @@ export default function EditStudyPage() {
     async function load() {
       setLoading(true);
       const [study, questionResult, sessionResult] = await Promise.all([
-        supabase.from("studies").select("title, passage, description").eq("id", studyId).single(),
-        supabase.from("study_questions").select("id, question_text, question_number, table_config").eq("study_id", studyId).order("question_number"),
+        supabase.from("studies").select("title, passage, description, leader_notes").eq("id", studyId).single(),
+        supabase.from("study_questions").select("id, question_text, question_number, table_config, leader_notes").eq("study_id", studyId).order("question_number"),
         supabase.from("study_sessions").select("id").eq("study_id", studyId).limit(1),
       ]);
       if (!active) return;
@@ -77,10 +79,12 @@ export default function EditStudyPage() {
       setTitle(study.data.title);
       setPassage(study.data.passage ?? "");
       setDescription(study.data.description ?? "");
+      setLeaderNotes(study.data.leader_notes ?? "");
       setQuestions(questionRows.map(q => ({
         id: q.id,
         localId: q.id,
         question_text: q.question_text,
+        leader_notes: q.leader_notes ?? "",
         table_config: q.table_config ?? null,
         supplements: storedItems.filter(item => item.question_id === q.id).map(item => ({
           id: item.id,
@@ -139,6 +143,7 @@ export default function EditStudyPage() {
 
       const { error: studyError } = await supabase.from("studies").update({
         title: title.trim(), passage: passage.trim() || null, description: description.trim() || null,
+        leader_notes: leaderNotes.trim() || null,
       }).eq("id", studyId);
       if (studyError) throw new Error(studyError.message);
 
@@ -162,6 +167,7 @@ export default function EditStudyPage() {
         const values = {
           question_number: i + 1,
           question_text: q.question_text.trim(),
+          leader_notes: q.leader_notes.trim() || null,
           table_config: normalizeQuestionTable(q.table_config),
         };
         let questionId = q.id;
@@ -225,10 +231,12 @@ export default function EditStudyPage() {
       <label className="block font-medium">{t("hostEdit.title")}<input disabled={hasSessions || saving} value={title} onChange={e => setTitle(e.target.value)} className="mt-2 block w-full rounded-lg border p-3" /></label>
       <label className="block font-medium">{t("hostCreate.passage")}<input disabled={hasSessions || saving} value={passage} onChange={e => setPassage(e.target.value)} className="mt-2 block w-full rounded-lg border p-3" /></label>
       <label className="block font-medium">{t("hostEdit.description")}<textarea disabled={hasSessions || saving} value={description} onChange={e => setDescription(e.target.value)} rows={3} className="mt-2 block w-full rounded-lg border p-3" /></label>
+      <label className="block font-medium">General Leader Notes <span className="text-sm font-normal text-slate-500">(private, optional)</span><textarea disabled={hasSessions || saving} value={leaderNotes} onChange={e => setLeaderNotes(e.target.value)} rows={6} placeholder="Introduction, main themes, transitions, conclusion..." className="mt-2 block w-full rounded-lg border p-3" /></label>
     </div>
     <section className="space-y-4 rounded-xl border bg-white p-6"><h2 className="text-xl font-semibold">{t("hostCreate.questions")}</h2>
       {questions.map((q, i) => <div key={q.localId} className="rounded-lg border bg-slate-50 p-4">
         <label className="block font-medium">{t("hostCreate.question")} {i + 1}<textarea disabled={hasSessions || saving} rows={3} value={q.question_text} onChange={e => updateQuestion(i, { question_text: e.target.value })} className="mt-2 block w-full rounded-lg border bg-white p-3" /></label>
+        <label className="mt-3 block font-medium">Leader Notes for This Question <span className="text-sm font-normal text-slate-500">(private, optional)</span><textarea disabled={hasSessions || saving} rows={4} value={q.leader_notes} onChange={e => updateQuestion(i, { leader_notes: e.target.value })} placeholder="Talking points, possible answers, Bible references, reminders..." className="mt-2 block w-full rounded-lg border bg-white p-3" /></label>
         <QuestionTableBuilder value={q.table_config} onChange={value => updateQuestion(i, { table_config: value })} disabled={hasSessions || saving} />
         <QuestionSupplementBuilder value={q.supplements} onChange={value => updateQuestion(i, { supplements: value })} disabled={hasSessions || saving} />
         {!hasSessions && <div className="mt-3 flex flex-wrap gap-2">
@@ -237,7 +245,7 @@ export default function EditStudyPage() {
           <button type="button" disabled={saving || questions.length === 1} onClick={() => setQuestions(old => old.filter((_, j) => j !== i))} className="rounded border border-red-300 px-3 py-1 text-red-700 disabled:opacity-40">{t("hostCreate.remove")}</button>
         </div>}
       </div>)}
-      {!hasSessions && <button type="button" disabled={saving} onClick={() => setQuestions(old => [...old, { localId: crypto.randomUUID(), question_text: "", table_config: null, supplements: [] }])} className="rounded-lg border border-indigo-600 px-4 py-2 text-indigo-700">+ {t("hostCreate.addQuestion")}</button>}
+      {!hasSessions && <button type="button" disabled={saving} onClick={() => setQuestions(old => [...old, { localId: crypto.randomUUID(), question_text: "", leader_notes: "", table_config: null, supplements: [] }])} className="rounded-lg border border-indigo-600 px-4 py-2 text-indigo-700">+ {t("hostCreate.addQuestion")}</button>}
     </section>
     {!hasSessions && <button type="button" disabled={saving} onClick={() => void save()} className="rounded-lg bg-indigo-600 px-6 py-3 font-semibold text-white disabled:opacity-50">{saving ? t("hostCreate.saving") : t("hostEdit.saveChanges")}</button>}
   </div></main>;

@@ -15,8 +15,8 @@ type Session = {
   current_question: number;
 };
 
-type Study = { title: string; passage: string | null };
-type Question = { id: string; question_number: number; question_text: string };
+type Study = { title: string; passage: string | null; leader_notes: string | null };
+type Question = { id: string; question_number: number; question_text: string; leader_notes: string | null };
 type SupplementItem = {
   id: string;
   question_id: string;
@@ -42,6 +42,7 @@ export default function SessionControlClient() {
   const [session, setSession] = useState<Session | null>(null);
   const [study, setStudy] = useState<Study | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [notesOpen, setNotesOpen] = useState(true);
   const [participants, setParticipants] = useState<ParticipantStatus[]>([]);
   const [supplements, setSupplements] = useState<SupplementItem[]>([]);
   const [supplementError, setSupplementError] = useState("");
@@ -117,7 +118,7 @@ export default function SessionControlClient() {
 
       const { data: studyData, error: studyError } = await supabase
         .from("studies")
-        .select("title, passage")
+        .select("title, passage, leader_notes")
         .eq("id", sessionData.study_id)
         .single();
       if (!active) return;
@@ -129,7 +130,7 @@ export default function SessionControlClient() {
 
       const { data: questionData, error: questionError } = await supabase
         .from("study_questions")
-        .select("id, question_number, question_text")
+        .select("id, question_number, question_text, leader_notes")
         .eq("study_id", sessionData.study_id)
         .order("question_number", { ascending: true });
       if (!active) return;
@@ -224,6 +225,7 @@ export default function SessionControlClient() {
   const current = session.current_question;
   const total = questions.length;
   const nextQuestion = questions.find(q => q.question_number === current + 1);
+  const activeQuestion = questions.find(q => q.question_number === current);
   const online = participants.filter(p => p.is_online);
   const ready = session.status === "live" && current > 0
     ? online.filter(p => p.is_ready).length : 0;
@@ -240,6 +242,49 @@ export default function SessionControlClient() {
         <p className="mt-2 text-slate-600">
           {study.title}{study.passage ? ` · ${study.passage}` : ""}
         </p>
+
+        <section className="mt-8 rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm sm:p-6" aria-label="Private leader notes">
+          <button
+            type="button"
+            onClick={() => setNotesOpen(open => !open)}
+            aria-expanded={notesOpen}
+            aria-controls="private-leader-notes"
+            className="flex w-full items-center justify-between gap-4 text-left"
+          >
+            <span>
+              <span className="block text-xl font-bold">{language === "ro" ? "Notițe pentru conducător" : "Leader Notes"}</span>
+              <span className="mt-1 block text-sm text-slate-500">{language === "ro" ? "Doar pentru conducător · nu sunt afișate participanților" : "For the leader only · not shown to participants"}</span>
+            </span>
+            <span className="shrink-0 text-sm font-semibold text-indigo-700">{notesOpen ? (language === "ro" ? "Ascunde ▲" : "Hide ▲") : (language === "ro" ? "Arată ▼" : "Show ▼")}</span>
+          </button>
+          {notesOpen && (
+            <div id="private-leader-notes" className="mt-5 space-y-5 border-t border-slate-200 pt-5">
+              <div>
+                <h3 className="font-semibold text-indigo-800">{language === "ro" ? "Notițe generale" : "General study notes"}</h3>
+                <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-800">
+                  {study.leader_notes?.trim() || (language === "ro" ? "Nu există notițe generale pentru acest studiu." : "No general notes added for this study.")}
+                </p>
+              </div>
+              <div className="border-t border-slate-200 pt-4">
+                <h3 className="font-semibold text-indigo-800">
+                  {current > 0 && activeQuestion
+                    ? `${language === "ro" ? "Întrebarea" : "Question"} ${current} · ${language === "ro" ? "notițe" : "notes"}`
+                    : (language === "ro" ? "Înainte de prima întrebare" : "Before the first question")}
+                </h3>
+                {current > 0 && activeQuestion ? (
+                  <>
+                    <p className="mt-2 whitespace-pre-wrap break-words text-sm font-medium text-slate-700">{activeQuestion.question_text}</p>
+                    <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-800">
+                      {activeQuestion.leader_notes?.trim() || (language === "ro" ? "Nu există notițe pentru această întrebare." : "No notes added for this question.")}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-500">{language === "ro" ? "Notițele întrebării vor apărea după ce dezvălui prima întrebare." : "Question-specific notes will appear when you reveal the first question."}</p>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
 
         <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <p className="text-sm text-slate-500">{t("hostSession.joiningCode")}</p>
