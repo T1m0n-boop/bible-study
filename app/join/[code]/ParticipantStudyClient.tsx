@@ -1,11 +1,13 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { TouchEvent } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "../../../lib/supabase";
 import { useLanguage } from "../../../components/LanguageProvider";
+import { PresentationPreview, type PresentationContent } from "../../../components/PresentationBlocks";
 
 type TableConfig = { headers: [string, string]; rows: string[] };
 type Supplement = {
@@ -22,6 +24,14 @@ type Question = {
   supplements?: Supplement[];
 };
 type TableAnswers = Record<string, Record<string, string>>;
+type PresentedBlock = {
+  id: string;
+  type: "question" | "slide" | "image" | "text";
+  position: number;
+  question_id: string | null;
+  content: PresentationContent;
+};
+
 type ParticipantSession = {
   session_id: string;
   session_name: string | null;
@@ -60,6 +70,9 @@ function ParticipantStudyContent() {
   const params = useParams<{ code: string }>();
   const code = params.code.toUpperCase();
   const [session, setSession] = useState<ParticipantSession | null>(null);
+  const [presentedBlocks, setPresentedBlocks] = useState<PresentedBlock[]>([]);
+  const [currentBlock, setCurrentBlock] = useState(0);
+  const [contentError, setContentError] = useState("");
   const [participantName, setParticipantName] = useState("Guest");
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [tableAnswers, setTableAnswers] = useState<TableAnswers>({});
@@ -79,7 +92,11 @@ function ParticipantStudyContent() {
   const userRef = useRef<User | null>(null);
   const notesReadyRef = useRef(false);
   const saveInProgressRef = useRef(false);
-  const [selectedQuestion, setSelectedQuestion] = useState<string | null>(null);
+  const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
+  const [followingLeader, setFollowingLeader] = useState(true);
+  const lastSessionIdRef = useRef("");
+  const [viewMode, setViewMode] = useState<"focused" | "continuous">("focused");
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const [participantIdentity, setParticipantIdentity] = useState<ParticipantIdentity | null>(null);
   const [presenceError, setPresenceError] = useState("");
   const [readyQuestion, setReadyQuestion] = useState<number | null>(null);
@@ -203,6 +220,17 @@ function ParticipantStudyContent() {
         setLoading(false);
         return;
       }
+      const { data: contentData, error: blocksError } = await supabase.rpc(
+        "get_participant_session_content", { p_join_code: code }
+      );
+      if (!active) return;
+      if (blocksError) {
+        setContentError(blocksError.message);
+      } else {
+        setContentError("");
+        setPresentedBlocks((contentData?.blocks ?? []) as PresentedBlock[]);
+        setCurrentBlock(contentData?.current_block ?? 0);
+      }
       const result = data as ParticipantSession;
       sessionRef.current = result;
       setSession(result);
@@ -276,6 +304,100 @@ function ParticipantStudyContent() {
       document.removeEventListener("visibilitychange", heartbeat);
     };
   }, [participantIdentity, session?.status === "ended"]);
+
+  // Display preference is local to this browser; no database change is required.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("bible-study-question-view") === "continuous") {
+        setViewMode("continuous");
+      }
+    } catch { /* Storage may be unavailable. */ }
+  }, []);
+
+  function changeViewMode(mode: "focused" | "continuous") {
+    setViewMode(mode);
+    try { localStorage.setItem("bible-study-question-view", mode); } catch {}
+  }
+
+  // The API must return only blocks the session has already presented.
+  // In particular, the SQL function must retain the highest-ever revealed position
+  // when the leader steps backwards (see accompanying SQL instructions).
+  const availableBlocks = [...presentedBlocks].sort((a, b) => a.position - b.position);
+  const leaderPosition = availableBlocks.some(block => block.position === currentBlock)
+    ? currentBlock : null;
+  const activePosition = followingLeader && leaderPosition !== null
+    ? leaderPosition : (availableBlocks.some(block => block.position === selectedPosition)
+      ? selectedPosition : leaderPosition ?? availableBlocks.at(-1)?.position ?? null);
+  const activeIndex = availableBlocks.findIndex(block => block.position === activePosition);
+  const visibleBlocks = viewMode === "focused"
+    ? availableBlocks.filter(block => block.position === activePosition) : availableBlocks;
+  const blockShortcuts = (() => {
+    let question = 0;
+    let other = 0;
+    return availableBlocks.map(block => ({
+      ...block,
+      shortcut: block.type === "question" ? `Q${++question}` : `B${++other}`,
+    }));
+  })();
+
+  useEffect(() => {
+    if (!session) return;
+    if (lastSessionIdRef.current !== session.session_id) {
+      lastSessionIdRef.current = session.session_id;
+      setFollowingLeader(true);
+      setSelectedPosition(null);
+    }
+  }, [session?.session_id]);
+
+  // Scroll only on deliberate navigation and when a following participant is
+  // advanced by the leader; routine polling must not interrupt text entry.
+  const previousLeaderRef = useRef<number | null>(null);
+  useEffect(() => {
+    const changed = previousLeaderRef.current !== currentBlock;
+    previousLeaderRef.current = currentBlock;
+    if (changed && followingLeader && leaderPosition !== null && viewMode === "continuous") {
+      requestAnimationFrame(() => document.getElementById(`block-${leaderPosition}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+  }, [currentBlock, followingLeader, leaderPosition, viewMode]);
+
+  function navigateBlock(position: number) {
+    if (!availableBlocks.some(block => block.position === position)) return;
+    setSelectedPosition(position);
+    setFollowingLeader(false);
+    if (viewMode === "continuous") {
+      requestAnimationFrame(() => document.getElementById(`block-${position}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+  }
+
+  function followLeader() {
+    if (leaderPosition === null) return;
+    setSelectedPosition(leaderPosition);
+    setFollowingLeader(true);
+    if (viewMode === "continuous") {
+      requestAnimationFrame(() => document.getElementById(`block-${leaderPosition}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+  }
+
+  function handleTouchStart(event: TouchEvent<HTMLElement>) {
+    if (viewMode !== "focused" || event.touches.length !== 1) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, button, select, a, [contenteditable='true']")) return;
+    touchStartRef.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  }
+
+  function handleTouchEnd(event: TouchEvent<HTMLElement>) {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    if (!start || viewMode !== "focused" || event.changedTouches.length !== 1) return;
+    const deltaX = event.changedTouches[0].clientX - start.x;
+    const deltaY = event.changedTouches[0].clientY - start.y;
+    if (Math.abs(deltaX) < 65 || Math.abs(deltaX) < Math.abs(deltaY) * 1.5) return;
+    const next = availableBlocks[activeIndex + (deltaX < 0 ? 1 : -1)];
+    if (next) navigateBlock(next.position);
+  }
 
   // Readiness belongs to the current question, not the whole session.
   useEffect(() => {
@@ -424,7 +546,7 @@ function ParticipantStudyContent() {
     if (!session) return;
     const lines = [
       session.study_title,
-      session.passage || "",
+      ...(session.passage?.trim() ? [session.passage.trim()] : []),
       session.session_name || "Bible Study Session",
       `${t("live.participant")}: ${participantName}`,
       "",
@@ -462,7 +584,7 @@ function ParticipantStudyContent() {
   if (!session) return null;
 
   return (
-    <main className="min-h-screen bg-slate-50 px-3 py-5 text-slate-900 sm:px-6 sm:py-10">
+    <main className="min-h-screen bg-slate-50 px-3 pb-44 pt-5 text-slate-900 sm:px-6 sm:py-10">
       <div className="mx-auto max-w-3xl">
         <Link href="/" className="font-medium text-indigo-700 hover:underline">← {t("live.home")}</Link>
         <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:mt-8 sm:p-6">
@@ -490,57 +612,46 @@ function ParticipantStudyContent() {
             {user && <button type="button" onClick={() => void flushNotes()} className="mt-3 min-h-11 rounded-lg border border-indigo-600 px-4 py-2 font-medium text-indigo-700">{t("live.retry")}</button>}
           </div>
         </div>
-        {session.status === "live" && session.current_question > 0 && (
-          <section className="mt-5 rounded-2xl border border-indigo-200 bg-white p-4 shadow-sm sm:p-6">
-            <h2 className="text-lg font-semibold">{t("live.readyTitle")}</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              {t("live.readyBefore")} {session.current_question},
-              {t("live.readyAfter")}
-            </p>
-            <button
-              type="button"
-              onClick={() => void toggleReady()}
-              disabled={!participantIdentity || readyBusy}
-              className={`mt-4 min-h-12 w-full rounded-xl px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 ${
-                readyQuestion === session.current_question
-                  ? "bg-emerald-700 hover:bg-emerald-800"
-                  : "bg-indigo-600 hover:bg-indigo-700"
-              }`}
-            >
-              {readyBusy
-                ? t("live.updating")
-                : !participantIdentity
-                  ? t("live.connecting")
-                  : readyQuestion === session.current_question
-                    ? t("live.readyUndo")
-                    : t("live.readyButton")}
-            </button>
-            <p className="mt-2 text-center text-xs text-slate-500">
-              {t("live.leaderDecides")}
-            </p>
-          </section>
-        )}
         {presenceError && session.status !== "ended" && (
           <p role="alert" className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             {t("live.presence")}: {presenceError}
           </p>
         )}
         {session.status === "ended" && <p className="mt-5 rounded-lg border border-slate-200 bg-white p-4 text-slate-700">{t("live.endedInfo")}</p>}
-        {session.questions.length > 0 && <button type="button" onClick={exportNotes} className="mt-5 rounded-lg bg-indigo-600 px-5 py-3 font-medium text-white hover:bg-indigo-700">{t("live.export")}</button>}
-        {session.questions.length > 1 && (
-          <nav aria-label={t("live.jump")} className="mt-5 flex flex-wrap gap-2">
-            {session.questions.map(q => <a key={q.id} href={`#question-${q.id}`} onClick={() => setSelectedQuestion(q.id)} className={`flex min-h-11 min-w-11 items-center justify-center rounded-lg border px-3 font-medium ${selectedQuestion === q.id ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-300 bg-white text-slate-700"}`}>{q.number}</a>)}
-          </nav>
+        {availableBlocks.length > 0 && (
+          <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+            <h2 className="text-sm font-semibold text-slate-700">{t("live.questionDisplay")}</h2>
+            <div className="mt-3 grid grid-cols-2 gap-2" role="group" aria-label={t("live.questionDisplay")}>
+              <button type="button" onClick={() => changeViewMode("focused")}
+                aria-pressed={viewMode === "focused"}
+                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${viewMode === "focused" ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-300 bg-white text-slate-700"}`}>
+                {t("live.oneAtATime")}
+              </button>
+              <button type="button" onClick={() => changeViewMode("continuous")}
+                aria-pressed={viewMode === "continuous"}
+                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${viewMode === "continuous" ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-300 bg-white text-slate-700"}`}>
+                {t("live.continuous")}
+              </button>
+            </div>
+          </section>
         )}
-        {session.questions.length === 0 ? (
+        {contentError && <p role="alert" className="mt-4 rounded-lg bg-amber-50 p-3 text-amber-800">{contentError}</p>}
+        {availableBlocks.length === 0 ? (
           <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-8 text-center">
             <h2 className="text-xl font-semibold">{session.status === "ended" ? t("live.noQuestions") : t("live.waitingFirst")}</h2>
             <p className="mt-3 text-slate-600">{session.status === "ended" ? t("live.endedNoQuestions") : t("live.leaderWill")}</p>
           </div>
         ) : (
-          <div className="mt-6 space-y-5">
-            {session.questions.map((question) => (
-              <article id={`question-${question.id}`} key={question.id} className="scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+          <div className="mt-6 space-y-5" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+            {visibleBlocks.map((block) => {
+              const question = block.type === "question"
+                ? session.questions.find(q => q.id === block.question_id) : undefined;
+              const shortcut = blockShortcuts.find(item => item.id === block.id)?.shortcut;
+              return <article id={`block-${block.position}`} key={block.id} className="scroll-mt-36 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-indigo-700">{shortcut} · {block.type}</p>
+                {block.type !== "question" ? (
+                  <PresentationPreview content={block.content ?? {}} type={block.type} compact />
+                ) : question ? (<>
                 <p className="text-sm font-semibold text-indigo-700">{t("live.question")} {question.number}</p>
                 <h2 className="mt-2 whitespace-pre-wrap break-words text-lg font-semibold leading-relaxed sm:text-xl">{question.text}</h2>
                 {(question.supplements ?? []).length > 0 && (
@@ -586,12 +697,79 @@ function ParticipantStudyContent() {
                   <textarea id={`note-${question.id}`} value={notes[question.id] ?? ""} onChange={(event) => updateNote(question.id, event.target.value)} placeholder={t("live.notesPlaceholder")} rows={6} disabled={!notesLoaded} className="mt-2 w-full min-h-44 resize-y rounded-xl border border-slate-300 bg-white p-4 text-base leading-relaxed text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:opacity-50" />
                   <p className="mt-2 text-xs text-slate-500">{user ? t("live.syncBackup") : t("live.savedDevice")}</p>
                 </div>
-              </article>
-            ))}
+                </>) : <p className="text-sm text-amber-800">This question is not currently returned by the session API. Update get_participant_session to retain previously presented questions.</p>}
+              </article>;
+            })}
+          </div>
+        )}
+        {availableBlocks.length > 0 && (
+          <div className="mt-5 space-y-4">
+            {viewMode === "focused" && availableBlocks.length > 1 && (
+              <nav aria-label={t("live.questionNavigation")} className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => { const previous = availableBlocks[activeIndex - 1]; if (previous) navigateBlock(previous.position); }} disabled={activeIndex <= 0}
+                  className="min-h-12 rounded-xl border border-slate-300 bg-white px-4 py-3 font-medium text-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
+                  ← {t("live.previous")}
+                </button>
+                <button type="button" onClick={() => { const next = availableBlocks[activeIndex + 1]; if (next) navigateBlock(next.position); }} disabled={activeIndex >= availableBlocks.length - 1}
+                  className="min-h-12 rounded-xl border border-slate-300 bg-white px-4 py-3 font-medium text-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
+                  {t("live.next")} →
+                </button>
+              </nav>
+            )}
+        {session.status === "live" && session.current_question > 0 && availableBlocks.find(block => block.position === currentBlock)?.type === "question" && (
+          <section className="mt-5 rounded-2xl border border-indigo-200 bg-white p-4 shadow-sm sm:p-6">
+            <h2 className="text-lg font-semibold">{t("live.readyTitle")}</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              {t("live.readyGeneral")}
+            </p>
+            <button
+              type="button"
+              onClick={() => void toggleReady()}
+              disabled={!participantIdentity || readyBusy}
+              className={`mt-4 min-h-12 w-full rounded-xl px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+                readyQuestion === session.current_question
+                  ? "bg-emerald-700 hover:bg-emerald-800"
+                  : "bg-indigo-600 hover:bg-indigo-700"
+              }`}
+            >
+              {readyBusy
+                ? t("live.updating")
+                : !participantIdentity
+                  ? t("live.connecting")
+                  : readyQuestion === session.current_question
+                    ? t("live.readyUndo")
+                    : t("live.readyButton")}
+            </button>
+            <p className="mt-2 text-center text-xs text-slate-500">
+              {t("live.leaderDecides")}
+            </p>
+          </section>
+        )}
+            <button type="button" onClick={exportNotes} className="w-full min-h-12 rounded-lg bg-indigo-600 px-5 py-3 font-medium text-white hover:bg-indigo-700">{t("live.export")}</button>
           </div>
         )}
         {error && <p role="alert" className="mt-6 text-sm text-red-600">{error}</p>}
       </div>
+      {session.status === "live" && availableBlocks.length > 0 && (
+        <nav aria-label="Study block navigation" className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-3 pt-2 shadow-lg backdrop-blur-sm" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+          <div className="mx-auto max-w-3xl">
+            <div className="flex gap-2 overflow-x-auto pb-2" aria-label="Previously presented blocks">
+              {blockShortcuts.map(block => (
+                <button key={block.id} type="button" onClick={() => navigateBlock(block.position)}
+                  title={`${block.type === "question" ? "Question" : "Content block"} · ${block.content?.title || block.shortcut}`}
+                  aria-current={activePosition === block.position ? "step" : undefined}
+                  className={`min-h-11 min-w-12 shrink-0 rounded-lg border px-3 font-semibold ${activePosition === block.position ? "border-indigo-700 bg-indigo-600 text-white" : block.type === "question" ? "border-indigo-300 bg-indigo-50 text-indigo-800" : "border-slate-300 bg-slate-100 text-slate-700"}`}>
+                  {block.shortcut}
+                </button>
+              ))}
+            </div>
+            <button type="button" onClick={followLeader} disabled={leaderPosition === null}
+              className={`min-h-11 w-full rounded-lg px-4 py-2 font-semibold disabled:opacity-50 ${followingLeader ? "border border-emerald-300 bg-emerald-50 text-emerald-800" : "bg-indigo-600 text-white"}`}>
+              {followingLeader ? "✓ Following Leader" : "↪ Follow Leader"}
+            </button>
+          </div>
+        </nav>
+      )}
     </main>
   );
 }

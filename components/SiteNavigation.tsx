@@ -11,8 +11,11 @@ type Access = { signedIn: boolean; leader: boolean; admin: boolean };
 export default function SiteNavigation() {
   const pathname = usePathname();
   const { t } = useLanguage();
+  const [mounted, setMounted] = useState(false);
   const [access, setAccess] = useState<Access>({ signedIn: false, leader: false, admin: false });
   const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
     let active = true;
@@ -47,6 +50,10 @@ export default function SiteNavigation() {
   }, []);
 
   useEffect(() => { setMenuOpen(false); }, [pathname]);
+
+  if (!mounted) {
+    return <nav aria-label="Main navigation" className="h-16 border-b border-slate-200 bg-white" />;
+  }
 
   const links = [
     { href: "/", label: t("nav.home") },

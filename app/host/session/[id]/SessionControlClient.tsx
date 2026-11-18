@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "../../../../lib/supabase";
 import { useLanguage } from "../../../../components/LanguageProvider";
+import { PresentationPreview, type PresentationContent } from "../../../../components/PresentationBlocks";
 
 type Session = {
   id: string;
@@ -13,6 +14,7 @@ type Session = {
   join_code: string;
   status: "waiting" | "live" | "ended";
   current_question: number;
+  current_block: number;
 };
 
 type Study = { title: string; passage: string | null; leader_notes: string | null };
@@ -24,6 +26,14 @@ type SupplementItem = {
   content: string;
   sort_order: number;
   is_revealed: boolean;
+};
+
+type ContentBlock = {
+  id: string;
+  block_type: "question" | "slide" | "text" | "image";
+  sort_order: number;
+  question_id: string | null;
+  content: PresentationContent | null;
 };
 
 type ParticipantStatus = {
@@ -42,6 +52,7 @@ export default function SessionControlClient() {
   const [session, setSession] = useState<Session | null>(null);
   const [study, setStudy] = useState<Study | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [blocks, setBlocks] = useState<ContentBlock[]>([]);
   const [notesOpen, setNotesOpen] = useState(true);
   const [participants, setParticipants] = useState<ParticipantStatus[]>([]);
   const [supplements, setSupplements] = useState<SupplementItem[]>([]);
@@ -140,6 +151,19 @@ export default function SessionControlClient() {
         return;
       }
 
+      const { data: blockData, error: blockError } = await supabase
+        .from("study_content_blocks")
+        .select("id, block_type, sort_order, question_id, content")
+        .eq("study_id", sessionData.study_id)
+        .order("sort_order", { ascending: true });
+      if (!active) return;
+      if (blockError) {
+        setError(blockError.message);
+        setLoading(false);
+        return;
+      }
+      setBlocks((blockData ?? []) as ContentBlock[]);
+
       setSession(sessionData as Session);
       setStudy(studyData as Study);
       setQuestions((questionData ?? []) as Question[]);
@@ -194,28 +218,48 @@ export default function SessionControlClient() {
     setSaving(false);
   }
 
-  async function undoLastReveal() {
-    if (!session || saving || session.status !== "live" || session.current_question < 1) return;
-    const previous = session.current_question;
-    const confirmed = window.confirm(
-      `${t("hostSession.undoHide")} ${previous} ${t("hostSession.undoReturn")} ${previous === 1 ? t("hostSession.undoWaiting") : `${t("hostSession.question")} ${previous - 1}`}?\n\n${t("hostSession.undoNotes")}`
-    );
-    if (!confirmed) return;
-
+  const jumpToBlock = useCallback(async (next: number) => {
+    if (!session || saving || session.status !== "live") return;
+    if (!Number.isInteger(next) || next < 0 || next > blocks.length || next === session.current_block) return;
     setSaving(true);
     setError("");
-    const { data, error: undoError } = await supabase.rpc(
-      "leader_undo_last_question_reveal",
-      { p_session_id: session.id, p_expected_question: previous }
+    const { data, error: navigationError } = await supabase.rpc(
+      "leader_set_current_block",
+      { p_session_id: session.id, p_expected_block: session.current_block, p_new_block: next }
     );
-    if (undoError || typeof data !== "number") {
-      setError(undoError?.message ?? t("hostSession.undoFailed"));
+    if (navigationError || !data || typeof data.current_block !== "number") {
+      setError(navigationError?.message ?? "Could not change the presentation position. Refresh and retry.");
     } else {
-      setSession({ ...session, current_question: data });
+      setSession(previous => previous?.id === session.id
+        ? { ...previous, current_block: data.current_block, current_question: data.current_question }
+        : previous);
       void loadParticipants();
     }
     setSaving(false);
+  }, [session, saving, blocks.length, loadParticipants]);
+
+  function navigateBlock(delta: -1 | 1) {
+    void jumpToBlock((session?.current_block ?? 0) + delta);
   }
+
+  // Keyboard shortcuts work only when focus is outside editable controls.
+  useEffect(() => {
+    if (session?.status !== "live") return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, textarea, select, button, a, [contenteditable='true']"))) return;
+      if (event.key === "ArrowRight" || event.key === "PageDown") {
+        event.preventDefault();
+        void jumpToBlock(session.current_block + 1);
+      } else if (event.key === "ArrowLeft" || event.key === "PageUp") {
+        event.preventDefault();
+        void jumpToBlock(session.current_block - 1);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [session?.status, session?.current_block, jumpToBlock]);
 
   if (loading) return <main className="p-8 text-center">{t("hostSession.loading")}</main>;
   if (!session || !study) return (
@@ -223,11 +267,19 @@ export default function SessionControlClient() {
   );
 
   const current = session.current_question;
+  const blockPosition = session.current_block ?? 0;
+  const activeBlock = blockPosition > 0 ? blocks[blockPosition - 1] : null;
+  const upcomingBlock = blocks[blockPosition] ?? null;
+  const activeIsQuestion = activeBlock?.block_type === "question";
+  const blockLabel = (block: ContentBlock) => block.block_type === "question"
+    ? `${language === "ro" ? "Întrebarea" : "Question"} ${questions.find(q => q.id === block.question_id)?.question_number ?? ""}`
+    : block.block_type === "slide" ? (language === "ro" ? "Diapozitiv" : "Slide")
+    : block.block_type === "text" ? (language === "ro" ? "Text" : "Text")
+    : (language === "ro" ? "Imagine" : "Image");
   const total = questions.length;
-  const nextQuestion = questions.find(q => q.question_number === current + 1);
   const activeQuestion = questions.find(q => q.question_number === current);
   const online = participants.filter(p => p.is_online);
-  const ready = session.status === "live" && current > 0
+  const ready = session.status === "live" && activeIsQuestion && current > 0
     ? online.filter(p => p.is_ready).length : 0;
   const allReady = online.length > 0 && ready === online.length;
 
@@ -242,6 +294,14 @@ export default function SessionControlClient() {
         <p className="mt-2 text-slate-600">
           {study.title}{study.passage ? ` · ${study.passage}` : ""}
         </p>
+
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <Link href={`/host/session/${session.id}/projector`} target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center rounded-lg bg-slate-900 px-5 py-3 font-semibold text-white hover:bg-slate-800">
+            {language === "ro" ? "Deschide proiectorul ↗" : "Open Projector ↗"}
+          </Link>
+          <span className="text-sm text-slate-500">{language === "ro" ? "Se deschide într-o filă nouă, pentru al doilea ecran." : "Opens in a new tab for your second screen."}</span>
+        </div>
 
         <section className="mt-8 rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm sm:p-6" aria-label="Private leader notes">
           <button
@@ -271,7 +331,9 @@ export default function SessionControlClient() {
                     ? `${language === "ro" ? "Întrebarea" : "Question"} ${current} · ${language === "ro" ? "notițe" : "notes"}`
                     : (language === "ro" ? "Înainte de prima întrebare" : "Before the first question")}
                 </h3>
-                {current > 0 && activeQuestion ? (
+                {activeBlock && activeBlock.block_type !== "question" ? (
+                  <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-800">{activeBlock.content?.leaderNotes?.trim() || (language === "ro" ? "Nu există notițe pentru acest diapozitiv." : "No notes added for this presentation block.")}</p>
+                ) : current > 0 && activeQuestion ? (
                   <>
                     <p className="mt-2 whitespace-pre-wrap break-words text-sm font-medium text-slate-700">{activeQuestion.question_text}</p>
                     <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-800">
@@ -300,37 +362,66 @@ export default function SessionControlClient() {
             </button>
           )}
 
-          {session.status === "live" && nextQuestion && (
-            <div className="mt-6 rounded-xl bg-slate-50 p-5">
-              <p className="text-sm text-slate-500">{t("hostSession.nextQuestion")}</p>
-              <p className="mt-2 whitespace-pre-wrap font-semibold">{nextQuestion.question_text}</p>
-              {current > 0 && (
-                <p className={`mt-3 text-sm font-medium ${allReady ? "text-emerald-700" : "text-amber-700"}`}>
-                  {online.length === 0
-                    ? t("hostSession.noOnline")
-                    : allReady
-                      ? t("hostSession.allReady")
-                      : `${ready} ${t("hostSession.of")} ${online.length} ${t("hostSession.onlineReadySuffix")}`}
-                </p>
-              )}
-              <button type="button" disabled={saving}
-                onClick={() => void updateSession({ current_question: nextQuestion.question_number })}
-                className="mt-4 rounded-lg bg-emerald-600 px-5 py-3 font-medium text-white disabled:opacity-50">
-                {t("hostSession.revealQuestion")} {nextQuestion.question_number}
-              </button>
-            </div>
-          )}
-
-          {session.status === "live" && current > 0 && (
-            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
-              <p className="text-sm text-amber-900">
-                {t("hostSession.undoHint")}
-              </p>
-              <button type="button" disabled={saving}
-                onClick={() => void undoLastReveal()}
-                className="mt-3 rounded-lg border border-amber-600 bg-white px-5 py-3 font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50">
-                {t("hostSession.undoReveal")} {current}
-              </button>
+          {session.status === "live" && (
+            <div className="mt-6 rounded-xl border border-indigo-200 bg-indigo-50 p-5">
+              <h2 className="text-lg font-bold">{language === "ro" ? "Prezentarea studiului" : "Study presentation"}</h2>
+              <p className="mt-2 text-sm text-slate-600">{language === "ro" ? "Conținut prezentat" : "Presented blocks"}: {blockPosition} / {blocks.length}</p>
+              {activeBlock ? (
+                <div className="mt-4 rounded-lg bg-white p-4">
+                  <p className="text-sm font-semibold text-indigo-700">{blockLabel(activeBlock)}</p>
+                  {activeIsQuestion ? (
+                    <p className="mt-2 whitespace-pre-wrap">{questions.find(q => q.id === activeBlock.question_id)?.question_text}</p>
+                  ) : (
+                    <PresentationPreview
+  content={activeBlock.content ?? {}}
+  type={
+    activeBlock.block_type === "question"
+      ? "slide"
+      : activeBlock.block_type
+  }
+  compact
+/>
+                  )}
+                </div>
+              ) : <p className="mt-3 text-slate-600">{language === "ro" ? "Niciun conținut prezentat încă." : "No content presented yet."}</p>}
+              {upcomingBlock && <p className="mt-4 text-sm">{language === "ro" ? "Urmează" : "Up next"}: <strong>{blockLabel(upcomingBlock)}{upcomingBlock.content?.title ? ` · ${upcomingBlock.content.title}` : ""}</strong></p>}
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button type="button" disabled={saving || blockPosition === 0} onClick={() => void navigateBlock(-1)} className="rounded-lg border border-indigo-500 bg-white px-5 py-3 font-medium text-indigo-800 disabled:opacity-40">← {language === "ro" ? "Înapoi" : "Previous"}</button>
+                <button type="button" disabled={saving || blockPosition >= blocks.length} onClick={() => void navigateBlock(1)} className="rounded-lg bg-indigo-600 px-5 py-3 font-medium text-white disabled:opacity-40">{language === "ro" ? "Prezintă următorul" : "Present next"} →</button>
+              </div>
+              <p className="mt-3 text-xs text-slate-600">{language === "ro" ? "Comenzi rapide: ← / → sau Page Up / Page Down (când nu editezi un câmp)." : "Keyboard shortcuts: ← / → or Page Up / Page Down (when not editing a field)."}</p>
+              <div className="mt-5 rounded-xl border border-indigo-200 bg-white p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-semibold">{language === "ro" ? "Cuprinsul prezentării" : "Presentation overview"}</h3>
+                  <span className="text-xs text-slate-500">{blocks.length} {language === "ro" ? "elemente" : "blocks"}</span>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">{language === "ro" ? "Selectează un element pentru a-l prezenta imediat tuturor participanților." : "Select a block to present it immediately to all participants."}</p>
+                <div className="mt-3 max-h-96 space-y-2 overflow-y-auto pr-1">
+                  <button type="button" disabled={saving} onClick={() => void jumpToBlock(0)} aria-current={blockPosition === 0 ? "step" : undefined}
+                    className={`w-full rounded-lg border px-3 py-2 text-left text-sm disabled:opacity-50 ${blockPosition === 0 ? "border-indigo-600 bg-indigo-100 font-semibold text-indigo-900" : "border-slate-200 hover:bg-slate-50"}`}>
+                    {language === "ro" ? "Înainte de primul element" : "Before first block"}
+                  </button>
+                  {blocks.map((block, index) => {
+                    const position = index + 1;
+                    const title = block.block_type === "question"
+                      ? questions.find(q => q.id === block.question_id)?.question_text
+                      : (block.content?.title || block.content?.body);
+                    return (
+                      <button key={block.id} type="button" disabled={saving} onClick={() => void jumpToBlock(position)}
+                        aria-current={blockPosition === position ? "step" : undefined}
+                        className={`flex w-full items-start gap-3 rounded-lg border px-3 py-3 text-left text-sm disabled:opacity-50 ${blockPosition === position ? "border-indigo-600 bg-indigo-100 text-indigo-900" : "border-slate-200 bg-white hover:bg-slate-50"}`}>
+                        <span className="w-7 shrink-0 text-center font-semibold">{position}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold">{blockLabel(block)}</span>
+                          <span className="mt-1 block truncate text-xs text-slate-600">{title || (language === "ro" ? "Fără titlu" : "Untitled")}</span>
+                        </span>
+                        {blockPosition === position && <span className="shrink-0 text-xs font-semibold">{language === "ro" ? "Acum" : "Now"}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {activeIsQuestion && <p className="mt-3 text-sm text-slate-600">{ready} / {online.length} {language === "ro" ? "participanți online pregătiți" : "online participants ready"}</p>}
             </div>
           )}
 
@@ -368,7 +459,7 @@ export default function SessionControlClient() {
           <div className="mt-5 space-y-5">
             {questions.filter(q => supplements.some(item => item.question_id === q.id)).map(question => {
               const questionItems = supplements.filter(item => item.question_id === question.id);
-              const isQuestionVisible = session.status === "live" && question.question_number <= current;
+              const isQuestionVisible = session.status === "live" && blocks.some(b => b.block_type === "question" && b.question_id === question.id && b.sort_order < blockPosition);
               return <div key={question.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-semibold text-indigo-700">{t("hostSession.question")} {question.question_number}</p>
                 <p className="mt-1 whitespace-pre-wrap font-medium">{question.question_text}</p>
@@ -418,7 +509,7 @@ export default function SessionControlClient() {
             </button>
           </div>
 
-          {session.status === "live" && current > 0 && (
+          {session.status === "live" && activeIsQuestion && current > 0 && (
             <div className="mt-5 rounded-xl bg-indigo-50 p-4">
               <div className="flex items-center justify-between gap-3">
                 <span className="font-medium">{t("hostSession.readyNext")}</span>
@@ -453,7 +544,7 @@ export default function SessionControlClient() {
                       {participant.is_online ? t("hostSession.onlineLabel") : t("hostSession.offlineLabel")}
                     </p>
                   </div>
-                  {session.status === "live" && current > 0 && (
+                  {session.status === "live" && activeIsQuestion && current > 0 && (
                     <span className={`rounded-full px-3 py-1 text-sm font-medium ${
                       !participant.is_online ? "bg-slate-100 text-slate-500"
                         : participant.is_ready ? "bg-emerald-100 text-emerald-800"
